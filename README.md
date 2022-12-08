@@ -1,0 +1,9 @@
+- [x] [Apples and Ginos](https://applesandginos.wordpress.com/skater-projections/) (Free) - Google Sheet
+- [x] [CBS Fantasy](https://www.cbssports.com/fantasy/hockey/stats/) (Free) - Website
+- [x] [DatsyukToZetterberg](https://docs.google.com/spreadsheets/d/1gejB9XqTto3iBoXtYBurS1tD0lJQ5VtcrnNyZKuYxO0/edit?hl=en#gid=1325856504) (Free) - Google Sheet
+- [x] [Dom Luszczysyn](#) ($5.99) - Excel
+- [x] [ESPN](https://fantasy.espn.com/hockey/players/projections) (Free) - Website
+- [x] [Numberfire](https://www.numberfire.com/nhl/fantasy/yearly-projections) (Free) - Website
+- [x] [Scott Cullen](#) (Free)
+- [x] [Steve Laidlaw](#) (Free)
+- [x] [Yahoo!](#) (Free) - Website

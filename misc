@@ -1,0 +1,413 @@
+select 
+    player_id,
+    avg(g) as g, 
+    avg(a) as a, 
+    avg(ppp) as ppp, 
+    avg(shp) as shp, 
+    avg(sog) as sog, 
+    avg(hit) as hit, 
+    avg(blk) as blk 
+from skater_projections
+group by player_id;
+
+CREATE OR REPLACE FUNCTION calculate_skater_points(target_player_id int)
+RETURNS decimal AS $fantasy_points$
+DECLARE
+    fantasy_points decimal;
+BEGIN
+    SELECT round((avg(g) * 3.5) + (avg(a) * 2.5) + (avg(ppp)) + (avg(sog) * 0.3) + (avg(hit) * 0.25) + (avg(blk) * 0.25), 2) INTO fantasy_points
+    FROM skater_projections
+    WHERE player_id = target_player_id;
+    RETURN fantasy_points;
+END
+$fantasy_points$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION calculate_goalie_points(target_player_id int)
+RETURNS decimal AS $fantasy_points$
+DECLARE
+    fantasy_points decimal;
+BEGIN
+    SELECT round((avg(w) * 4) + (avg(l) * -2) + (avg(ga) * -1) + (avg(sv) * 0.2) + (avg(so) * 3), 2) INTO fantasy_points
+    FROM goalie_projections
+    WHERE player_id = target_player_id;
+    RETURN fantasy_points;
+END
+$fantasy_points$ LANGUAGE plpgsql;
+
+
+CREATE OR REPLACE FUNCTION calculate_fantasy_points(target_player_id int, target_position varchar)
+RETURNS decimal AS $fantasy_points$
+DECLARE
+    fantasy_points decimal;
+BEGIN
+    IF target_position = 'G' THEN
+        SELECT round((avg(w) * 4) + (avg(l) * -2) + (avg(ga) * -1) + (avg(sv) * 0.2) + (avg(so) * 3), 2) INTO fantasy_points
+        FROM goalie_projections
+        WHERE player_id = target_player_id
+        GROUP BY player_id;
+        RETURN fantasy_points;
+    ELSE
+        SELECT round((avg(g) * 3.5) + (avg(a) * 2.5) + (avg(ppp)) + (avg(shp) * 1.25) + (avg(sog) * 0.3) + (avg(hit) * 0.25) + (avg(blk) * 0.25), 2) INTO fantasy_points
+        FROM skater_projections
+        WHERE player_id = target_player_id
+        GROUP BY player_id;
+        RETURN fantasy_points;
+    END IF;
+END
+$fantasy_points$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION calculate_position_cutoff_points(target_position varchar)
+RETURNS decimal AS $fantasy_points$
+DECLARE
+    fantasy_points decimal;
+BEGIN
+    IF target_position = 'G' THEN
+        WITH cutoffs AS (
+            SELECT
+                calculate_goalie_points(s.player_id) as fp, 
+                RANK() OVER(ORDER BY calculate_goalie_points(s.player_id) DESC NULLS LAST) as cutoff
+            FROM goalie_projections s JOIN players p ON p.id = s.player_id
+            WHERE p.position LIKE '%' || 'G' || '%'
+            GROUP BY s.player_id
+        )
+        SELECT fp INTO fantasy_points FROM cutoffs
+        WHERE cutoff = 42;
+    ELSIF target_position LIKE '%D%' THEN
+        WITH cutoffs AS (
+            SELECT
+                calculate_skater_points(s.player_id) as fp, 
+                RANK() OVER(ORDER BY calculate_skater_points(s.player_id) DESC NULLS LAST) as cutoff
+            FROM skater_projections s JOIN players p ON p.id = s.player_id
+            WHERE p.position LIKE '%D%'
+            GROUP BY s.player_id
+        )
+        SELECT fp INTO fantasy_points FROM cutoffs
+        WHERE cutoff = 62;
+
+    ELSIF target_position LIKE '%RW%' THEN
+        WITH cutoffs AS (
+            SELECT
+                calculate_skater_points(s.player_id) as fp, 
+                RANK() OVER(ORDER BY calculate_skater_points(s.player_id) DESC NULLS LAST) as cutoff
+            FROM skater_projections s JOIN players p ON p.id = s.player_id
+            WHERE p.position LIKE '%RW%'
+            GROUP BY s.player_id
+        )
+        SELECT fp INTO fantasy_points FROM cutoffs
+        WHERE cutoff = 76;
+
+    ELSIF target_position LIKE '%LW%' THEN
+        WITH cutoffs AS (
+            SELECT
+                calculate_skater_points(s.player_id) as fp, 
+                RANK() OVER(ORDER BY calculate_skater_points(s.player_id) DESC NULLS LAST) as cutoff
+            FROM skater_projections s JOIN players p ON p.id = s.player_id
+            WHERE p.position LIKE '%LW%' AND p.position NOT LIKE '%RW%'
+            GROUP BY s.player_id
+        )
+        SELECT fp INTO fantasy_points FROM cutoffs
+        WHERE cutoff = 40;
+    ELSE
+        WITH cutoffs AS (
+            SELECT
+                calculate_skater_points(s.player_id) as fp, 
+                RANK() OVER(ORDER BY calculate_skater_points(s.player_id) DESC NULLS LAST) as cutoff
+            FROM skater_projections s JOIN players p ON p.id = s.player_id
+            WHERE p.position LIKE '%C%' AND p.position NOT LIKE '%RW%' AND p.position NOT LIKE '%LW%'
+            GROUP BY s.player_id
+        )
+        SELECT fp INTO fantasy_points FROM cutoffs
+        WHERE cutoff = 48;
+    END IF;
+    RETURN fantasy_points;
+END;
+$fantasy_points$ LANGUAGE plpgsql;
+
+
+WITH cutoffs AS (
+    SELECT
+        calculate_skater_points(s.player_id) as fantasy_points, 
+        RANK() OVER(ORDER BY calculate_skater_points(s.player_id) DESC NULLS LAST) as cutoff
+    FROM skater_projections s JOIN players p ON p.id = s.player_id
+    WHERE p.position LIKE '%' || 'LW' || '%'
+    GROUP BY s.player_id
+)
+SELECT fantasy_points FROM cutoffs
+WHERE cutoff = 32;
+
+
+WITH cutoffs AS (
+    SELECT
+        calculate_position_cutoff_points('C') as c,
+        calculate_position_cutoff_points('LW') as lw,
+        calculate_position_cutoff_points('RW') as rw,
+        calculate_position_cutoff_points('D') as d,
+        calculate_position_cutoff_points('G') as g
+)
+SELECT * FROM (
+    (SELECT name, position, round(calculate_skater_points(id) - cutoffs.c / 10, 1) as vorp
+    FROM players
+    WHERE position LIKE '%C%' AND position NOT LIKE '%RW%' AND position NOT LIKE '%LW%'
+    GROUP BY id)
+    UNION
+    (SELECT name, position, round(calculate_skater_points(id) - cutoffs.c / 10, 1) as vorp
+    FROM players
+    WHERE position LIKE '%LW%' AND position NOT LIKE '%RW%'
+    GROUP BY id)
+    UNION
+    (SELECT name, position, round(calculate_skater_points(id) - cutoffs.c / 10, 1) as vorp
+    FROM players
+    WHERE position LIKE '%RW%'
+    GROUP BY id)
+    UNION
+    (SELECT name, position, round(calculate_skater_points(id) - cutoffs.c / 10, 1) as vorp
+    FROM players
+    WHERE position LIKE '%D%'
+    GROUP BY id)
+    UNION
+    (SELECT name, position, round(calculate_skater_points(id) - cutoffs.c / 10, 1) as vorp
+    FROM players
+    WHERE position LIKE '%G%'
+    GROUP BY id) 
+) player_vorp;
+
+
+
+
+
+SELECT
+    name,
+    position,
+    calculate_skater_points(id) AS fantasy_points
+FROM players
+WHERE position != 'G'
+UNION
+SELECT
+    name,
+    position,
+    calculate_goalie_points(id) AS fantasy_points
+FROM players
+WHERE position = 'G';
+
+
+
+
+
+
+SELECT * FROM
+    (SELECT 
+        name, 
+        position, 
+        fantasy_points,
+        round((fantasy_points - calculate_position_cutoff_points(position)) / 10, 1) as vorp
+    FROM (
+        (SELECT 
+            name, 
+            position,
+            calculate_skater_points(id) AS fantasy_points 
+        FROM players 
+        WHERE position != 'G') 
+        UNION 
+        (SELECT 
+            name, 
+            position,
+            calculate_goalie_points(id) AS fantasy_points 
+        FROM players 
+        WHERE position = 'G')) subselect) topselect
+    ORDER BY vorp DESC NULLS LAST;
+
+
+WITH cutoffs AS (
+    SELECT 'C' as position, calculate_position_cutoff_points('C') as cutoff
+    UNION
+    SELECT 'C,LW' as position, calculate_position_cutoff_points('LW') as cutoff
+    UNION
+    SELECT 'C,RW' as position, calculate_position_cutoff_points('RW') as cutoff
+    UNION
+    SELECT 'C,LW,RW' as position, calculate_position_cutoff_points('RW') as cutoff
+    UNION
+    SELECT 'LW,RW' as position, calculate_position_cutoff_points('RW') as cutoff
+    UNION
+    SELECT 'LW' as position, calculate_position_cutoff_points('LW') as cutoff
+    UNION
+    SELECT 'RW' as position, calculate_position_cutoff_points('RW') as cutoff
+    UNION
+    SELECT 'D' as position, calculate_position_cutoff_points('D') as cutoff
+    UNION
+    SELECT 'LW,D' as position, calculate_position_cutoff_points('D') as cutoff
+    UNION
+    SELECT 'RW,D' as position, calculate_position_cutoff_points('D') as cutoff
+    UNION
+    SELECT 'G' as position, calculate_position_cutoff_points('G') as cutoff
+)
+SELECT *
+FROM (
+    SELECT p.*, calculate_fantasy_points(p.id, p.position) AS fantasy_points
+    FROM players p
+    JOIN cutoffs c ON p.position LIKE '%' + c.position + '%') sub
+WHERE fantasy_points IS NOT NULL
+ORDER BY fantasy_points DESC;
+
+SELECT 
+    id,
+    RANK() OVER(ORDER BY vorp DESC) as rk,
+    name, 
+    position, 
+    team, 
+    fp,
+    vorp, 
+    adp, 
+    round(adp) - rk AS diff
+FROM (
+    SELECT 
+        players.*, 
+        calculate_fantasy_points(players.id, players.position) AS fp,
+        round((calculate_fantasy_points(players.id, players.position) - cutoff) / 10, 1) AS vorp,
+        RANK() OVER(ORDER BY (calculate_fantasy_points(players.id, players.position) - cutoff) DESC NULLS LAST) as rk
+    FROM players
+    JOIN 
+        (
+            SELECT 
+                position, 
+                calculate_position_cutoff_points(position) AS cutoff
+            FROM 
+                (
+                    SELECT DISTINCT(position) FROM players
+                ) AS distinct_positions
+        ) AS position_cutoffs 
+    ON position_cutoffs.position = players.position
+) subquery
+LEFT JOIN adp ON adp.player_id = id
+WHERE vorp IS NOT NULL
+ORDER BY adp ASC NULLS LAST;
+
+SELECT
+    name,
+    RANK() OVER(ORDER BY fp DESC NULLS LAST),
+    fp,
+    round((fp - 199.97) / 10, 1) as vorp
+FROM (
+    select p.name, calculate_fantasy_points(p.id, p.position) as fp from players p where position like '%G%' 
+) sub
+WHERE round((fp - 199.97) / 10, 1) IS NOT NULL;
+
+ position | cutoff 
+----------+--------
+ RW       | 282.47
+ D        | 206.15
+ C        | 278.77
+ C,LW     | 247.34
+ LW       | 247.34
+ LW,RW    | 282.47
+ LW,D     | 206.15
+ RW,D     | 206.15
+ G        | 199.97
+ C,RW     | 282.47
+
+
+select
+
+SELECT 
+    p.name, p.team, p.position,
+    ROUND(AVG(fp) / 10, 1) AS v,
+    ROUND(STDDEV(fp) / 10, 1) AS sd
+FROM players p JOIN (
+    SELECT
+        player_id,
+        (g * 3.5) + (a * 2.5) + ppp + (sog * 0.3) + (hit * 0.25) + (blk * 0.25) as fp
+    FROM (
+        SELECT 
+            s.player_id, 
+            COALESCE(s.g, average_fp.g, 0) AS g,
+            COALESCE(s.a, average_fp.a, 0) AS a,
+            COALESCE(s.ppp, average_fp.ppp, 0) AS ppp,
+            COALESCE(s.sog, average_fp.sog, 0) AS sog,
+            COALESCE(s.hit, average_fp.hit, 0) AS hit,
+            COALESCE(s.blk, average_fp.blk, 0) AS blk
+        FROM skater_projections s JOIN
+            ( 
+            SELECT
+                player_id,
+                count(*),
+                AVG(gp) AS gp,
+                AVG(g) AS g,
+                AVG(a) AS a,
+                AVG(ppp) AS ppp,
+                AVG(sog) AS sog,
+                AVG(hit) AS hit,
+                AVG(blk) AS blk
+            FROM skater_projections
+            GROUP BY player_id
+        ) average_fp ON s.player_id = average_fp.player_id) top) top2 ON top2.player_id = p.id
+GROUP BY p.name, p.team, p.position
+ORDER BY AVG(fp) DESC;
+
+SELECT 
+    player_id,
+    fp
+FROM (
+    SELECT
+        player_id,
+        (g * 3.5) + (a * 2.5) + ppp + (sog * 0.3) + (hit * 0.25) + (blk * 0.25) AS fp
+    FROM skater_projections
+) fantasy_points
+ORDER BY fp DESC;
+
+SELECT p.name, p.position, p.team, s.* 
+FROM skater_projections s
+JOIN players p ON p.id = s.player_id
+WHERE player_id IN (
+    SELECT
+        player_id
+    FROM skater_projections
+    GROUP BY player_id
+    HAVING 
+        AVG(gp) IS NULL OR      
+        AVG(g) IS NULL OR
+        AVG(a) IS NULL OR
+        AVG(ppp) IS NULL OR
+        AVG(sog) IS NULL OR
+        AVG(hit) IS NULL OR
+        AVG(blk) IS NULL
+);
+
+SELECT p.name, p.position, p.team, g.* 
+FROM goalie_projections g
+JOIN players p ON p.id = g.player_id
+WHERE player_id IN (
+    SELECT
+        player_id
+    FROM goalie_projections
+    GROUP BY player_id
+    HAVING 
+        AVG(gp) IS NULL OR      
+        AVG(w) IS NULL OR
+        AVG(l) IS NULL OR
+        AVG(ga) IS NULL OR
+        AVG(sv) IS NULL OR
+        AVG(so) IS NULL
+);
+
+
+SELECT 
+    p.name, 
+    p.team, 
+    p.position,
+    ROUND(AVG(fp) / 10, 1) AS v,
+    ROUND(STDDEV(fp) / 10, 1) AS sd
+FROM players p JOIN (
+    SELECT
+        player_id,
+        (g * 3.5) + (a * 2.5) + ppp + (sog * 0.3) + (hit * 0.25) + (blk * 0.25) as fp
+    FROM (
+        SELECT 
+            s.player_id, 
+            COALESCE(s.g, skater_stats.g, 0) AS g,
+            COALESCE(s.a, skater_stats.a, 0) AS a,
+            COALESCE(s.ppp, skater_stats.ppp, 0) AS ppp,
+            COALESCE(s.sog, skater_stats.sog, 0) AS sog,
+            COALESCE(s.hit, skater_stats.hit, 0) AS hit,
+            COALESCE(s.blk, skater_stats.blk, 0) AS blk
+        FROM skater_projections s join skater_stats on s.player_id = skater_stats.player_id) top) top2 ON top2.player_id = p.id
+GROUP BY p.name, p.team, p.position
+ORDER BY AVG(fp) DESC;
